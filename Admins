@@ -1,0 +1,260 @@
+import sqlite3
+import qrcode
+from fpdf import FPDF
+from tkinter import *
+from tkinter import messagebox, ttk
+from PIL import Image
+from datetime import datetime
+
+# Información del local
+LOCAL_INFO = {
+    "nombre": "Mi Negocio",
+    "direccion": "Calle Ejemplo 123, Ciudad",
+    "telefono": "+1 123 456 7890"
+}
+
+# Crear la base de datos
+def initialize_db():
+    conn = sqlite3.connect("gestion.db")
+    cursor = conn.cursor()
+    
+    # Crear tabla de usuarios
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS usuarios (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nombre TEXT NOT NULL,
+            contrasena TEXT NOT NULL,
+            rol TEXT NOT NULL
+        )
+    """)
+    
+    # Crear tabla de auditoría
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS auditoria (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            usuario TEXT NOT NULL,
+            accion TEXT NOT NULL,
+            detalles TEXT,
+            fecha TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    
+    # Crear tabla de facturas
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS facturas (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            numero_factura TEXT UNIQUE NOT NULL,
+            cliente TEXT NOT NULL,
+            fecha TEXT NOT NULL,
+            detalles TEXT NOT NULL,
+            subtotal REAL NOT NULL,
+            impuestos REAL NOT NULL,
+            total REAL NOT NULL
+        )
+    """)
+
+    # Crear tabla de ingresos y egresos
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS movimientos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tipo TEXT NOT NULL, 
+            descripcion TEXT NOT NULL, 
+            monto REAL NOT NULL,
+            fecha TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    
+    # Crear tabla de empleados
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS empleados (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nombre TEXT NOT NULL,
+            salario REAL NOT NULL,
+            dias_trabajados INTEGER NOT NULL,
+            dias_faltados INTEGER NOT NULL,
+            dias_libres TEXT NOT NULL
+        )
+    """)
+    
+    conn.commit()
+    conn.close()
+
+# Función para registrar auditoría
+def log_audit(usuario, accion, detalles=""):
+    conn = sqlite3.connect("gestion.db")
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO auditoria (usuario, accion, detalles) 
+        VALUES (?, ?, ?)
+    """, (usuario, accion, detalles))
+    conn.commit()
+    conn.close()
+
+# Función para generar el PDF de una factura con código QR
+def generate_invoice_pdf_with_qr(factura_id):
+    conn = sqlite3.connect("gestion.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM facturas WHERE id = ?", (factura_id,))
+    factura = cursor.fetchone()
+    conn.close()
+
+    if not factura:
+        messagebox.showerror("Error", "Factura no encontrada.")
+        return
+
+    numero_factura, cliente, fecha, detalles, subtotal, impuestos, total = factura[1:]
+
+    # Crear el contenido del QR
+    qr_data = (
+        f"Factura: {numero_factura}\n"
+        f"Cliente: {cliente}\n"
+        f"Fecha: {fecha}\n"
+        f"Negocio: {LOCAL_INFO['nombre']}\n"
+        f"Dirección: {LOCAL_INFO['direccion']}\n"
+        f"Teléfono: {LOCAL_INFO['telefono']}\n"
+        f"Total: {total:.2f}"
+    )
+
+    # Generar el QR
+    qr = qrcode.QRCode(version=1, box_size=10, border=4)
+    qr.add_data(qr_data)
+    qr.make(fit=True)
+    qr_img = qr.make_image(fill_color="black", back_color="white")
+    qr_filename = f"qr_factura_{numero_factura}.png"
+    qr_img.save(qr_filename)
+
+    # Crear el PDF
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Arial", size=12)
+
+    pdf.cell(200, 10, txt="Factura", ln=True, align="C")
+    pdf.cell(200, 10, txt=f"Número: {numero_factura}", ln=True)
+    pdf.cell(200, 10, txt=f"Cliente: {cliente}", ln=True)
+    pdf.cell(200, 10, txt=f"Fecha: {fecha}", ln=True)
+    pdf.ln(10)
+
+    pdf.set_font("Arial", size=10)
+    pdf.multi_cell(200, 10, txt=f"Detalles:\n{detalles}")
+    pdf.ln(10)
+
+    pdf.cell(200, 10, txt=f"Subtotal: {subtotal:.2f}", ln=True)
+    pdf.cell(200, 10, txt=f"Impuestos: {impuestos:.2f}", ln=True)
+    pdf.cell(200, 10, txt=f"Total: {total:.2f}", ln=True)
+
+    # Agregar el QR al PDF
+    pdf.image(qr_filename, x=10, y=pdf.get_y(), w=50)
+    output_filename = f"factura_{numero_factura}.pdf"
+    pdf.output(output_filename)
+
+    # Limpiar archivo temporal QR
+    import os
+    os.remove(qr_filename)
+
+    messagebox.showinfo("Éxito", f"Factura guardada como {output_filename}")
+
+# Interfaz de facturación
+def manage_invoices():
+    invoice_window = Toplevel()
+    invoice_window.title("Facturación")
+
+    def refresh_invoices():
+        for row in tree.get_children():
+            tree.delete(row)
+        conn = sqlite3.connect("gestion.db")
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, numero_factura, cliente, fecha, total FROM facturas")
+        rows = cursor.fetchall()
+        conn.close()
+        for row in rows:
+            tree.insert("", "end", values=row)
+
+    def add_invoice():
+        numero_factura = entry_numero.get()
+        cliente = entry_cliente.get()
+        fecha = entry_fecha.get()
+        detalles = text_detalles.get("1.0", END).strip()
+        subtotal = float(entry_subtotal.get())
+        impuestos = float(entry_impuestos.get())
+        total = subtotal + impuestos
+
+        if not numero_factura or not cliente or not detalles:
+            messagebox.showerror("Error", "Datos inválidos.")
+            return
+
+        conn = sqlite3.connect("gestion.db")
+        cursor = conn.cursor()
+        try:
+            cursor.execute("""
+                INSERT INTO facturas (numero_factura, cliente, fecha, detalles, subtotal, impuestos, total)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (numero_factura, cliente, fecha, detalles, subtotal, impuestos, total))
+            conn.commit()
+            conn.close()
+            log_audit("admin", "Agregar factura", f"Número: {numero_factura}, Cliente: {cliente}")
+            messagebox.showinfo("Éxito", "Factura creada.")
+            refresh_invoices()
+        except sqlite3.IntegrityError:
+            messagebox.showerror("Error", "El número de factura ya existe.")
+
+    def generate_pdf():
+        selected_item = tree.selection()
+        if not selected_item:
+            messagebox.showerror("Error", "Seleccione una factura.")
+            return
+        factura_id = tree.item(selected_item[0])["values"][0]
+        generate_invoice_pdf_with_qr(factura_id)
+
+    # Widgets
+    Label(invoice_window, text="Número de Factura").grid(row=0, column=0, padx=10, pady=5)
+    entry_numero = Entry(invoice_window)
+    entry_numero.grid(row=0, column=1, padx=10, pady=5)
+
+    Label(invoice_window, text="Cliente").grid(row=1, column=0, padx=10, pady=5)
+    entry_cliente = Entry(invoice_window)
+    entry_cliente.grid(row=1, column=1, padx=10, pady=5)
+
+    Label(invoice_window, text="Fecha").grid(row=2, column=0, padx=10, pady=5)
+    entry_fecha = Entry(invoice_window)
+    entry_fecha.grid(row=2, column=1, padx=10, pady=5)
+
+    Label(invoice_window, text="Detalles").grid(row=3, column=0, padx=10, pady=5)
+    text_detalles = Text(invoice_window, height=5, width=30)
+    text_detalles.grid(row=3, column=1, padx=10, pady=5)
+
+    Label(invoice_window, text="Subtotal").grid(row=4, column=0, padx=10, pady=5)
+    entry_subtotal = Entry(invoice_window)
+    entry_subtotal.grid(row=4, column=1, padx=10, pady=5)
+
+    Label(invoice_window, text="Impuestos").grid(row=5, column=0, padx=10, pady=5)
+    entry_impuestos = Entry(invoice_window)
+    entry_impuestos.grid(row=5, column=1, padx=10, pady=5)
+
+    Button(invoice_window, text="Agregar", command=add_invoice).grid(row=6, column=0, columnspan=2, pady=10)
+
+    # Tabla de facturas
+    tree = ttk.Treeview(invoice_window, columns=("ID", "Número", "Cliente", "Fecha", "Total"), show="headings")
+    tree.heading("ID", text="ID")
+    tree.heading("Número", text="Número")
+    tree.heading("Cliente", text="Cliente")
+    tree.heading("Fecha", text="Fecha")
+    tree.heading("Total", text="Total")
+    tree.grid(row=7, column=0, columnspan=2, pady=10)
+
+    Button(invoice_window, text="Generar PDF con QR", command=generate_pdf).grid(row=8, column=0, columnspan=2, pady=10)
+
+    refresh_invoices()
+
+# Función principal
+def main():
+    initialize_db()
+
+    root = Tk()
+    root.title("Aplicación de Gestión Administrativa")
+
+    Button(root, text="Gestionar Facturas", command=manage_invoices).pack(pady=20)
+
+    root.mainloop()
+
+if __name__ == "__main__":
+    main()
